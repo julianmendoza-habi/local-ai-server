@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS user_identities (
     provider        TEXT        NOT NULL,   -- 'local' | 'google' | 'github' | 'microsoft'
     provider_id     TEXT,                   -- NULL for provider='local'
     password_hash   TEXT,                   -- only used when provider='local'
+    password_salt   TEXT,                   -- bcrypt salt, only used when provider='local'
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (provider, provider_id),
     UNIQUE (user_id, provider)

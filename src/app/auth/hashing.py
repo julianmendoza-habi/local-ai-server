@@ -1,8 +1,11 @@
 import bcrypt
 
 
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+def hash_password(plain: str) -> tuple[str, str]:
+    """Returns (password_hash, password_salt)."""
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(plain.encode(), salt)
+    return hashed.decode(), salt.decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:

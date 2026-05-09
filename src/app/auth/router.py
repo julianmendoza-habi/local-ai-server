@@ -34,7 +34,7 @@ async def register(body: RegisterRequest, pool: asyncpg.Pool = Depends(get_pool)
 
     user_id = uuid.uuid4()
     is_admin = settings.is_admin_email(email)
-    pw_hash = hash_password(body.password)
+    pw_hash, pw_salt = hash_password(body.password)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -50,11 +50,12 @@ async def register(body: RegisterRequest, pool: asyncpg.Pool = Depends(get_pool)
             )
             await conn.execute(
                 """
-                INSERT INTO user_identities (user_id, provider, password_hash)
-                VALUES ($1, 'local', $2)
+                INSERT INTO user_identities (user_id, provider, password_hash, password_salt)
+                VALUES ($1, 'local', $2, $3)
                 """,
                 user_id,
                 pw_hash,
+                pw_salt,
             )
 
     return TokenResponse(access_token=create_token(user_id, email, is_admin))

@@ -1,0 +1,604 @@
+{
+  "info": {
+    "name": "Local AI Server",
+    "description": "Full collection for testing the local-ai-server FastAPI server. Covers health check, chat session lifecycle, thinking/nothinking modes, explicit model selection, SSE streaming, and all expected error cases.\n\nRequests are meant to run sequentially — session IDs are chained between folders via collection variables. Run with Newman using --timeout-request 180000 to accommodate slow LLM responses.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "chatId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "thinkingChatId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "allowedModel",
+      "value": "gemma4:e2b",
+      "type": "string",
+      "description": "Must match a model name present in ALLOWED_MODELS in your .env. Defaults to gemma4:e2b."
+    },
+    {
+      "key": "disallowedModel",
+      "value": "gpt-99",
+      "type": "string",
+      "description": "A model name that is intentionally NOT in ALLOWED_MODELS. Used to verify the 400 rejection path."
+    }
+  ],
+  "item": [
+    {
+      "name": "01 · Health",
+      "item": [
+        {
+          "name": "GET /health — server is up",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health",
+            "description": "Verifies the server is running. Expects {\"status\": \"ok\"}."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('body is {status: ok}', () => {",
+                  "  pm.expect(pm.response.json()).to.deep.equal({ status: 'ok' });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 · Chat — new session",
+      "item": [
+        {
+          "name": "POST /chat — new session with default model",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"What is recursion? Answer in one sentence.\"\n}"
+            },
+            "description": "Creates a new session without a chat_id. The server assigns a UUID and uses the default model. Saves the chat_id for subsequent requests."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('response has required fields', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b).to.have.property('chat_id').that.is.a('string').with.length.above(0);",
+                  "  pm.expect(b).to.have.property('model').that.is.a('string');",
+                  "  pm.expect(b).to.have.property('reply').that.is.a('string').with.length.above(0);",
+                  "  pm.expect(b).to.have.property('messages').that.is.an('array').with.length.above(0);",
+                  "});",
+                  "",
+                  "pm.test('messages contains the user turn', () => {",
+                  "  pm.expect(pm.response.json().messages.some(m => m.role === 'human')).to.be.true;",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('chatId', pm.response.json().chat_id);",
+                  "console.log('chatId saved:', pm.response.json().chat_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — new session in nothinking mode",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"How much is 7 times 8?\",\n  \"mode\": \"nothinking\"\n}"
+            },
+            "description": "Creates a session with mode=nothinking. The thinking field in the response should be null."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('thinking is null in nothinking mode', () => {",
+                  "  pm.expect(pm.response.json().thinking).to.be.null;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — new session in thinking mode",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"What is 17 times 38? Show the steps.\",\n  \"mode\": \"thinking\"\n}"
+            },
+            "description": "Creates a session with mode=thinking. The thinking field may contain the model's internal reasoning. Saves thinkingChatId for the streaming test."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('has chat_id and non-empty reply', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.chat_id).to.be.a('string');",
+                  "  pm.expect(b.reply).to.be.a('string').with.length.above(0);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('thinkingChatId', pm.response.json().chat_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — new session with explicit model",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Tell me your name.\",\n  \"model\": \"{{allowedModel}}\"\n}"
+            },
+            "description": "Forces a specific model from the allowed list. The response model field must reflect the requested model.\n\nNote: the allowedModel collection variable defaults to gemma4:e2b. If your ALLOWED_MODELS contains only one model, set allowedModel to that same name — this test will still pass because it uses whatever is allowed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('response model matches requested model', () => {",
+                  "  pm.expect(pm.response.json().model).to.equal(pm.collectionVariables.get('allowedModel'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 · Chat — continue session",
+      "item": [
+        {
+          "name": "POST /chat — continue existing session",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Give me a Python code example.\",\n  \"chat_id\": \"{{chatId}}\"\n}"
+            },
+            "description": "Continues the session created in folder 02. The chat history should accumulate (at least 2 user turns)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('chat_id does not change', () => {",
+                  "  pm.expect(pm.response.json().chat_id).to.equal(pm.collectionVariables.get('chatId'));",
+                  "});",
+                  "",
+                  "pm.test('accumulated history has at least 4 messages', () => {",
+                  "  // 2 turns x 2 roles (human + ai)",
+                  "  pm.expect(pm.response.json().messages.length).to.be.at.least(4);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — continue session switching to thinking mode",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Does that code have any potential bugs?\",\n  \"chat_id\": \"{{chatId}}\",\n  \"mode\": \"thinking\"\n}"
+            },
+            "description": "Continues the same session but requests thinking mode for this single turn. The model and chat_id must remain the same."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('chat_id is consistent', () => {",
+                  "  pm.expect(pm.response.json().chat_id).to.equal(pm.collectionVariables.get('chatId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 · Chat — get history",
+      "item": [
+        {
+          "name": "GET /chat/{chatId} — history of active session",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/chat/{{chatId}}",
+            "description": "Retrieves the full history of the session created in folder 02. Verifies the ChatHistoryResponse schema."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('ChatHistoryResponse schema', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.chat_id).to.equal(pm.collectionVariables.get('chatId'));",
+                  "  pm.expect(b).to.have.property('model').that.is.a('string');",
+                  "  pm.expect(b).to.have.property('created_at').that.is.a('string');",
+                  "  pm.expect(b).to.have.property('messages').that.is.an('array');",
+                  "});",
+                  "",
+                  "pm.test('each message has role and content', () => {",
+                  "  pm.response.json().messages.forEach(m => {",
+                  "    pm.expect(m).to.have.property('role');",
+                  "    pm.expect(m).to.have.property('content');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 · Streaming SSE",
+      "item": [
+        {
+          "name": "GET /chat/{chatId}/stream — basic stream (nothinking)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/chat/{{chatId}}/stream?message=Summarise+the+conversation+in+one+sentence.&mode=nothinking",
+              "host": ["{{baseUrl}}"],
+              "path": ["chat", "{{chatId}}", "stream"],
+              "query": [
+                { "key": "message", "value": "Summarise the conversation in one sentence." },
+                { "key": "mode", "value": "nothinking" }
+              ]
+            },
+            "description": "Opens the SSE stream. Newman buffers the full response as text once the stream closes. Verifies Content-Type, presence of data: events, and the final done event.\n\nRun with --timeout-request 180000 so Newman does not close the connection before the model finishes.",
+            "timeout": 180000
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('Content-Type is text/event-stream', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/event-stream');",
+                  "});",
+                  "",
+                  "pm.test('body contains at least one data event', () => {",
+                  "  pm.expect(pm.response.text()).to.include('data:');",
+                  "});",
+                  "",
+                  "// Python json.dumps produces '\"done\": true' (with a space); regex handles any whitespace.",
+                  "pm.test('body contains done=true event at the end', () => {",
+                  "  pm.expect(pm.response.text()).to.match(/\"done\"\\s*:\\s*true/);",
+                  "});",
+                  "",
+                  "pm.test('done event contains chat_id and model', () => {",
+                  "  const raw = pm.response.text();",
+                  "  const doneEvent = raw.split('\\n').find(l => l.startsWith('data:') && /\"done\"\\s*:\\s*true/.test(l));",
+                  "  if (doneEvent) {",
+                  "    const payload = JSON.parse(doneEvent.replace(/^data:\\s*/, '').trim());",
+                  "    pm.expect(payload).to.have.property('chat_id');",
+                  "    pm.expect(payload).to.have.property('model');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /chat/{thinkingChatId}/stream — stream with thinking mode",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/chat/{{thinkingChatId}}/stream?message=Give+me+a+similar+calculation.&mode=thinking",
+              "host": ["{{baseUrl}}"],
+              "path": ["chat", "{{thinkingChatId}}", "stream"],
+              "query": [
+                { "key": "message", "value": "Give me a similar calculation." },
+                { "key": "mode", "value": "thinking" }
+              ]
+            },
+            "description": "SSE stream in thinking mode on the session created in folder 02.",
+            "timeout": 180000
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('body contains done event', () => {",
+                  "  pm.expect(pm.response.text()).to.match(/\"done\"\\s*:\\s*true/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 · Error cases",
+      "item": [
+        {
+          "name": "POST /chat — 404 non-existent chat_id",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Hello\",\n  \"chat_id\": \"00000000-0000-0000-0000-000000000000\"\n}"
+            },
+            "description": "Tries to continue a session with a UUID that does not exist. Expects 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('detail mentions the chat_id', () => {",
+                  "  pm.expect(pm.response.json().detail).to.include('00000000-0000-0000-0000-000000000000');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — 400 model not allowed",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Test\",\n  \"model\": \"{{disallowedModel}}\"\n}"
+            },
+            "description": "Requests a model (gpt-99) that is never present in ALLOWED_MODELS regardless of your .env configuration. Expects 400."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('detail mentions the model name', () => {",
+                  "  pm.expect(pm.response.json().detail).to.include(pm.collectionVariables.get('disallowedModel'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — 422 empty message",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"\"\n}"
+            },
+            "description": "Sends an empty message string. Pydantic enforces min_length=1 on the message field and returns 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 422 Unprocessable Entity', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — 422 missing message field",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gemma4:e2b\"\n}"
+            },
+            "description": "Omits the required message field entirely. Expects 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 422 Unprocessable Entity', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /chat/{chatId} — 404 non-existent session",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/chat/00000000-0000-0000-0000-000000000000",
+            "description": "Requests the history of a session that does not exist. Expects 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /chat/{chatId}/stream — 404 non-existent session",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/chat/00000000-0000-0000-0000-000000000000/stream?message=test",
+              "host": ["{{baseUrl}}"],
+              "path": ["chat", "00000000-0000-0000-0000-000000000000", "stream"],
+              "query": [{ "key": "message", "value": "test" }]
+            },
+            "description": "Tries to stream from a non-existent session. Expects 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /chat/{chatId} — 404 non-existent session",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/chat/00000000-0000-0000-0000-000000000000",
+            "description": "Tries to delete a session that does not exist. Expects 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "07 · Delete session",
+      "item": [
+        {
+          "name": "DELETE /chat/{chatId} — delete active session",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/chat/{{chatId}}",
+            "description": "Deletes the main session created in folder 02. Expects deleted=true and the correct chat_id echoed back."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('DeleteResponse schema is correct', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.deleted).to.be.true;",
+                  "  pm.expect(b.chat_id).to.equal(pm.collectionVariables.get('chatId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /chat/{chatId} — 404 after delete",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/chat/{{chatId}}",
+            "description": "Confirms the deleted session is gone. Expects 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404 after delete', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /chat/{thinkingChatId} — clean up thinking session",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/chat/{{thinkingChatId}}",
+            "description": "Deletes the thinking session created in folder 02 to leave the server in a clean state."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('deleted is true', () => pm.expect(pm.response.json().deleted).to.be.true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ from typing import AsyncIterator
 import asyncpg
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import db as db_module
@@ -57,7 +58,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.add_exception_handler(QueueOverloadError, queue_overload_handler)  # type: ignore[arg-type]
+
+
+@app.exception_handler(Exception)
+async def internal_server_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc) or "Internal server error"},
+    )
 
 
 @app.exception_handler(httpx.ConnectError)

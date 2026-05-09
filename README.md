@@ -409,16 +409,20 @@ npm install -g newman
 
 **Run (non-thinking model):**
 ```bash
-newman run local-ai-server.postman_collection.json \
+newman run collections/local-ai-server.postman_collection.json \
   --timeout-request 180000 \
-  --delay-request 500
+  --delay-request 500 \
+  --env-var "adminEmail=you@example.com" \
+  --env-var "adminPassword=yourpassword"
 ```
 
 **Run (thinking-capable model):**
 ```bash
-newman run local-ai-server.thinking.postman_collection.json \
+newman run collections/local-ai-server.thinking.postman_collection.json \
   --timeout-request 180000 \
   --delay-request 500 \
+  --env-var "adminEmail=you@example.com" \
+  --env-var "adminPassword=yourpassword" \
   --env-var "allowedModel=deepseek-r1:7b"
 ```
 
@@ -437,9 +441,11 @@ newman run local-ai-server.postman_collection.json \
 
 **Overriding collection variables at run time:**
 ```bash
-newman run local-ai-server.postman_collection.json \
+newman run collections/local-ai-server.postman_collection.json \
   --timeout-request 180000 \
   --delay-request 500 \
+  --env-var "adminEmail=you@example.com" \
+  --env-var "adminPassword=yourpassword" \
   --env-var "allowedModel=gemma4:e2b" \
   --env-var "baseUrl=http://192.168.1.10:8000"
 ```

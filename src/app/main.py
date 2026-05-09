@@ -2,13 +2,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import asyncpg
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.config import settings
 from app.exceptions import QueueOverloadError, queue_overload_handler
 from app.model_registry import ModelRegistry
-from app.session_store import SessionStore
+from app.session_store import PostgresSessionStore, SessionStore
 from app.routers import chat as chat_module
 from app.routers.chat import router as chat_router
 from app.routers.streaming import router as streaming_router
@@ -23,15 +25,24 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting up local-ai-server")
-    store = SessionStore()
-    registry = ModelRegistry()
 
-    # Wire singletons into the chat router's dependency injectors
+    pool: asyncpg.Pool | None = None
+    if settings.database_url:
+        pool = await asyncpg.create_pool(settings.database_url)
+        store: PostgresSessionStore | SessionStore = PostgresSessionStore(pool)
+        logger.info("Using PostgreSQL session store")
+    else:
+        store = SessionStore()
+        logger.info("Using in-memory session store (no DATABASE_URL set)")
+
+    registry = ModelRegistry()
     chat_module._session_store = store
     chat_module._model_registry = registry
 
     yield
 
+    if pool:
+        await pool.close()
     logger.info("Shutting down local-ai-server")
 
 
@@ -42,7 +53,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Exception handlers
 app.add_exception_handler(QueueOverloadError, queue_overload_handler)  # type: ignore[arg-type]
 
 
@@ -54,7 +64,6 @@ async def ollama_connect_handler(request: Request, exc: httpx.ConnectError) -> J
     )
 
 
-# Routers
 app.include_router(chat_router)
 app.include_router(streaming_router)
 

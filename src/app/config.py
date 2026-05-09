@@ -8,9 +8,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    ollama_base_url: str = "http://localhost:11434"
-    default_model: str = "gemma4:e2b"
-    allowed_models: list[str] = ["gemma4:e2b", "llama3", "mistral"]
+    ollama_base_url: str
+    default_model: str
+    allowed_models: list[str]
 
     max_concurrent_ollama_requests: int = 2
     max_queue_size: int = 10
@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     max_messages_per_session: int = 20
     ollama_keep_alive: int = -1
+
+    database_url: str | None = None
 
 
 settings = Settings()

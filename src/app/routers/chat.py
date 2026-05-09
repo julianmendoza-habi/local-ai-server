@@ -6,12 +6,13 @@ from uuid import uuid4
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from ollama import ResponseError as OllamaResponseError
 
 from app.config import settings
 from app.exceptions import QueueOverloadError
 from app.models import ChatHistoryResponse, ChatRequest, ChatResponse, DeleteResponse, MessageRecord
 from app.model_registry import ModelRegistry
-from app.session_store import ChatSession, SessionStore
+from app.session_store import AbstractSessionStore, ChatSession
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +22,11 @@ router = APIRouter(tags=["chat"])
 # Dependency injectors — implementations are wired up in main.py
 # ---------------------------------------------------------------------------
 
-_session_store: SessionStore | None = None
+_session_store: AbstractSessionStore | None = None
 _model_registry: ModelRegistry | None = None
 
 
-def get_session_store() -> SessionStore:
+def get_session_store() -> AbstractSessionStore:
     assert _session_store is not None, "SessionStore not initialised"
     return _session_store
 
@@ -61,7 +62,7 @@ def _serialize_messages(messages: list[BaseMessage]) -> list[MessageRecord]:
 @router.post("/chat", response_model=ChatResponse)
 async def post_chat(
     request: ChatRequest,
-    store: SessionStore = Depends(get_session_store),
+    store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> ChatResponse:
     # Resolve session and model
@@ -105,6 +106,10 @@ async def post_chat(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Model response timed out")
+    except OllamaResponseError as exc:
+        if exc.status_code == 400:
+            raise HTTPException(status_code=400, detail=exc.error)
+        raise HTTPException(status_code=502, detail=f"Ollama error: {exc.error}")
     except httpx.ConnectError:
         raise HTTPException(status_code=502, detail="Ollama is not reachable. Is it running?")
     finally:
@@ -130,16 +135,14 @@ async def post_chat(
         model=model_name,
         reply=str(response.content),
         thinking=thinking,
-        messages=_serialize_messages(
-            session.truncated_messages(settings.max_messages_per_session)
-        ),
+        messages=_serialize_messages(context + [response]),
     )
 
 
 @router.get("/chat/{chat_id}", response_model=ChatHistoryResponse)
 async def get_chat(
     chat_id: str,
-    store: SessionStore = Depends(get_session_store),
+    store: AbstractSessionStore = Depends(get_session_store),
 ) -> ChatHistoryResponse:
     session = await store.get(chat_id)
     if session is None:
@@ -156,7 +159,7 @@ async def get_chat(
 @router.delete("/chat/{chat_id}", response_model=DeleteResponse)
 async def delete_chat(
     chat_id: str,
-    store: SessionStore = Depends(get_session_store),
+    store: AbstractSessionStore = Depends(get_session_store),
 ) -> DeleteResponse:
     deleted = await store.delete(chat_id)
     if not deleted:

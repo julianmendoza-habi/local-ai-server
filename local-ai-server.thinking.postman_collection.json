@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Local AI Server",
-    "description": "Full collection for testing the local-ai-server FastAPI server. Covers health check, chat session lifecycle, POST /chat/stream, and all expected error cases.\n\nDesigned for models that do NOT support thinking mode (e.g. gemma3:4b, gemma4:e2b). For thinking-capable models use local-ai-server.thinking.postman_collection.json.\n\nRequests run sequentially — session IDs are chained via collection variables. Run with Newman using --timeout-request 180000.",
+    "name": "Local AI Server — Thinking",
+    "description": "Collection for models that support thinking mode (e.g. deepseek-r1, qwq). Covers all modes including thinking and POST /chat/stream. Run with Newman using --timeout-request 180000.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -16,15 +16,20 @@
       "type": "string"
     },
     {
+      "key": "thinkingChatId",
+      "value": "",
+      "type": "string"
+    },
+    {
       "key": "streamChatId",
       "value": "",
       "type": "string"
     },
     {
       "key": "allowedModel",
-      "value": "gemma3:4b",
+      "value": "deepseek-r1:7b",
       "type": "string",
-      "description": "Must match a model name present in ALLOWED_MODELS in your .env."
+      "description": "Must match a thinking-capable model in ALLOWED_MODELS in your .env."
     },
     {
       "key": "disallowedModel",
@@ -41,8 +46,7 @@
           "name": "GET /health — server is up",
           "request": {
             "method": "GET",
-            "url": "{{baseUrl}}/health",
-            "description": "Verifies the server is running. Expects {\"status\": \"ok\"}."
+            "url": "{{baseUrl}}/health"
           },
           "event": [
             {
@@ -72,8 +76,7 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"message\": \"What is recursion? Answer in one sentence.\"\n}"
-            },
-            "description": "Creates a new session without a chat_id. Saves chatId for subsequent requests."
+            }
           },
           "event": [
             {
@@ -121,6 +124,37 @@
                   "pm.test('thinking is null in nothinking mode', () => {",
                   "  pm.expect(pm.response.json().thinking).to.be.null;",
                   "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /chat — new session in thinking mode",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/chat",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"What is 17 times 38? Show the steps.\",\n  \"mode\": \"thinking\"\n}"
+            },
+            "description": "Creates a session with mode=thinking. Saves thinkingChatId."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('has chat_id and non-empty reply', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.chat_id).to.be.a('string');",
+                  "  pm.expect(b.reply).to.be.a('string').with.length.above(0);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('thinkingChatId', pm.response.json().chat_id);"
                 ]
               }
             }
@@ -187,7 +221,7 @@
           ]
         },
         {
-          "name": "POST /chat — 400 thinking mode on non-thinking model",
+          "name": "POST /chat — continue session switching to thinking mode",
           "request": {
             "method": "POST",
             "url": "{{baseUrl}}/chat",
@@ -195,19 +229,16 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"message\": \"Does that code have any potential bugs?\",\n  \"chat_id\": \"{{chatId}}\",\n  \"mode\": \"thinking\"\n}"
-            },
-            "description": "Sending thinking mode to a model that does not support it. Expects 400 with a descriptive error instead of 500."
+            }
           },
           "event": [
             {
               "listen": "test",
               "script": {
                 "exec": [
-                  "pm.test('status 400 — model does not support thinking', () => {",
-                  "  pm.response.to.have.status(400);",
-                  "});",
-                  "pm.test('detail mentions thinking', () => {",
-                  "  pm.expect(pm.response.json().detail.toLowerCase()).to.include('thinking');",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('chat_id is consistent', () => {",
+                  "  pm.expect(pm.response.json().chat_id).to.equal(pm.collectionVariables.get('chatId'));",
                   "});"
                 ]
               }
@@ -269,7 +300,6 @@
                 { "key": "mode", "value": "nothinking" }
               ]
             },
-            "description": "Opens the SSE stream on an existing session. Newman buffers the full response. Run with --timeout-request 180000.",
             "timeout": 180000
           },
           "event": [
@@ -299,6 +329,35 @@
                   "    pm.expect(payload).to.have.property('chat_id');",
                   "    pm.expect(payload).to.have.property('model');",
                   "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /chat/{thinkingChatId}/stream — thinking mode",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/chat/{{thinkingChatId}}/stream?message=Give+me+a+similar+calculation.&mode=thinking",
+              "host": ["{{baseUrl}}"],
+              "path": ["chat", "{{thinkingChatId}}", "stream"],
+              "query": [
+                { "key": "message", "value": "Give me a similar calculation." },
+                { "key": "mode", "value": "thinking" }
+              ]
+            },
+            "timeout": 180000
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('body contains done event', () => {",
+                  "  pm.expect(pm.response.text()).to.match(/\"done\"\\s*:\\s*true/);",
                   "});"
                 ]
               }
@@ -358,16 +417,15 @@
           ]
         },
         {
-          "name": "POST /chat/stream — continue session",
+          "name": "POST /chat/stream — continue session in thinking mode",
           "request": {
             "method": "POST",
             "url": "{{baseUrl}}/chat/stream",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"message\": \"Give me a JavaScript example of that.\",\n  \"chat_id\": \"{{streamChatId}}\"\n}"
+              "raw": "{\n  \"message\": \"Give me a JavaScript example of that.\",\n  \"chat_id\": \"{{streamChatId}}\",\n  \"mode\": \"thinking\"\n}"
             },
-            "description": "Continues the session created in the previous request.",
             "timeout": 180000
           },
           "event": [
@@ -524,7 +582,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"gemma3:4b\"\n}"
+              "raw": "{\n  \"model\": \"deepseek-r1:7b\"\n}"
             }
           },
           "event": [
@@ -633,6 +691,24 @@
               "script": {
                 "exec": [
                   "pm.test('status 404 after delete', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /chat/{thinkingChatId} — clean up thinking session",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/chat/{{thinkingChatId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('deleted is true', () => pm.expect(pm.response.json().deleted).to.be.true);"
                 ]
               }
             }

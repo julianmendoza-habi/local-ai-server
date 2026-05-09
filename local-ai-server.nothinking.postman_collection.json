@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Local AI Server",
-    "description": "Full collection for testing the local-ai-server FastAPI server. Covers health check, chat session lifecycle, POST /chat/stream, and all expected error cases.\n\nDesigned for models that do NOT support thinking mode (e.g. gemma3:4b, gemma4:e2b). For thinking-capable models use local-ai-server.thinking.postman_collection.json.\n\nRequests run sequentially — session IDs are chained via collection variables. Run with Newman using --timeout-request 180000.",
+    "name": "Local AI Server — Nothinking",
+    "description": "Collection for models that do NOT support thinking mode (e.g. gemma3:4b, gemma4:e2b). All requests use default or nothinking mode. Run with Newman using --timeout-request 180000.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -72,8 +72,7 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"message\": \"What is recursion? Answer in one sentence.\"\n}"
-            },
-            "description": "Creates a new session without a chat_id. Saves chatId for subsequent requests."
+            }
           },
           "event": [
             {
@@ -269,7 +268,6 @@
                 { "key": "mode", "value": "nothinking" }
               ]
             },
-            "description": "Opens the SSE stream on an existing session. Newman buffers the full response. Run with --timeout-request 180000.",
             "timeout": 180000
           },
           "event": [
@@ -367,7 +365,6 @@
               "mode": "raw",
               "raw": "{\n  \"message\": \"Give me a JavaScript example of that.\",\n  \"chat_id\": \"{{streamChatId}}\"\n}"
             },
-            "description": "Continues the session created in the previous request.",
             "timeout": 180000
           },
           "event": [

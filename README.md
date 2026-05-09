@@ -2,12 +2,12 @@
 
 Stateful AI gateway over a local [Ollama](https://ollama.ai) instance — built with FastAPI, LangChain, and async Python.
 
-A Postman/Newman collection covering all endpoints is included at `local-ai-server.postman_collection.json` — see [Running Tests](#running-tests) for full usage.
+Three Postman/Newman collections are included — see [Running Tests](#running-tests) for full usage.
 
 ## Features
 
 - **Multi-model support** — select a model per request or use the configured default
-- **Chat sessions** — stateful conversations with persistent context (in-memory, DB-ready interface)
+- **Chat sessions** — stateful conversations backed by PostgreSQL (falls back to in-memory without `DATABASE_URL`)
 - **Thinking / non-thinking modes** — maps to Ollama's native `think` parameter
 - **Concurrency control** — semaphore-based queue; configurable max concurrent requests and queue depth
 - **Streaming** — SSE endpoint for token-by-token streaming
@@ -16,7 +16,58 @@ A Postman/Newman collection covering all endpoints is included at `local-ai-serv
 
 ---
 
-## Requirements
+## Docker (recommended)
+
+Everything runs in Docker: the API server, PostgreSQL, and Ollama. Pick the compose file that matches your hardware.
+
+### NVIDIA GPU
+
+> **Prerequisite:** [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) must be installed and configured on the host.
+
+```bash
+cp .env.example .env  # adjust models if needed
+
+docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+```
+
+### AMD GPU (ROCm)
+
+> **Prerequisite:** ROCm drivers installed on the host.
+
+```bash
+cp .env.example .env
+
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d
+```
+
+### CPU only
+
+No extra prerequisites — runs Ollama on CPU.
+
+```bash
+cp .env.example .env
+
+docker compose up -d
+```
+
+Models listed in `ALLOWED_MODELS` (in `.env`) are pulled automatically on first start. Check progress with:
+
+```bash
+docker compose logs -f ollama
+```
+
+The API is then available at `http://localhost:8000`.
+
+### Stopping
+
+```bash
+docker compose down          # keep volumes (DB + model weights)
+docker compose down -v       # also delete volumes
+```
+
+---
+
+## Requirements (local dev, no Docker)
 
 - Python 3.11+
 - [Ollama](https://ollama.ai) running locally
@@ -24,7 +75,7 @@ A Postman/Newman collection covering all endpoints is included at `local-ai-serv
 
 ---
 
-## Setup
+## Setup (local dev)
 
 ```bash
 # 1. Clone and enter the repo
@@ -62,6 +113,7 @@ Interactive docs: `http://localhost:8000/docs`
 | `REQUEST_TIMEOUT_SECONDS` | `120.0` | Abort LLM call after N seconds |
 | `MAX_MESSAGES_PER_SESSION` | `20` | Sliding window per chat |
 | `OLLAMA_KEEP_ALIVE` | `-1` | Seconds to keep model in VRAM (-1 = forever) |
+| `DATABASE_URL` | _(unset)_ | PostgreSQL DSN. If unset, sessions are stored in memory (lost on restart) |
 
 ---
 
@@ -108,9 +160,35 @@ Delete a chat session.
 
 ---
 
+### `POST /chat/stream`
+
+Create a new session (or continue an existing one) and stream the reply immediately — no separate `POST /chat` needed first.
+
+**Request body** (same schema as `POST /chat`):
+```json
+{
+  "message": "Explain closures briefly.",
+  "chat_id": "optional-existing-id",
+  "model": "optional-model-name",
+  "mode": "nothinking"
+}
+```
+
+**Response:** SSE stream. The `chat_id` assigned to the new session arrives in the final `done` event:
+```
+data: {"token": "A"}
+data: {"token": " closure"}
+...
+data: {"done": true, "chat_id": "550e8400-...", "model": "gemma3:4b"}
+```
+
+Save the `chat_id` from the `done` event to continue the conversation in subsequent requests.
+
+---
+
 ### `GET /chat/{chat_id}/stream?message=...&mode=...`
 
-Stream tokens via Server-Sent Events. Each event:
+Stream tokens on an **existing** session via Server-Sent Events. Each event:
 ```
 data: {"token": "sky"}
 data: {"token": " appears"}
@@ -158,9 +236,20 @@ curl -s -X POST http://localhost:8000/chat \
   -d '{"message": "Hello!", "model": "llama3"}' | python3 -m json.tool
 ```
 
-### Stream a response
+### Stream a response — new session (first message streams immediately)
 ```bash
-curl -s -N "http://localhost:8000/chat/$CHAT_ID/stream?message=Summarise+that&mode=nothinking"
+curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Explain closures briefly."}'
+# Save the chat_id from the done event, then continue:
+curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d "{\"message\": \"Give me a Python example.\", \"chat_id\": \"$CHAT_ID\"}"
+```
+
+### Stream a response — existing session (GET)
+```bash
+curl -N "http://localhost:8000/chat/$CHAT_ID/stream?message=Summarise+that&mode=nothinking"
 ```
 
 ### Get chat history
@@ -191,22 +280,38 @@ pytest --cov=app --cov-report=term-missing
 
 ### Newman (end-to-end against a live server)
 
-The collection at `local-ai-server.postman_collection.json` exercises every endpoint with a real Ollama instance. It is meant to run in folder order — session IDs are chained via collection variables between folders.
+Three collections are provided. Pick the one that matches your model:
+
+| File | Use when |
+|---|---|
+| `local-ai-server.postman_collection.json` | Default — models without thinking support (gemma3:4b, gemma4:e2b, etc.) |
+| `local-ai-server.nothinking.postman_collection.json` | Same as above, explicitly named |
+| `local-ai-server.thinking.postman_collection.json` | Models with thinking support (deepseek-r1, qwq, etc.) |
+
+All collections run in folder order — session IDs are chained via collection variables between folders. They cover `POST /chat`, `GET /chat/stream`, `POST /chat/stream`, history, error paths, and cleanup.
 
 **Install Newman once:**
 ```bash
 npm install -g newman
 ```
 
-**Run the full collection:**
+**Run (non-thinking model):**
 ```bash
 newman run local-ai-server.postman_collection.json \
   --timeout-request 180000 \
   --delay-request 500
 ```
 
-- `--timeout-request 180000` — gives each request up to 3 minutes; LLM calls can be slow, and the SSE stream tests need to wait for the final `done` event.
-- `--delay-request 500` — adds 500 ms between requests to avoid hammering the concurrency queue.
+**Run (thinking-capable model):**
+```bash
+newman run local-ai-server.thinking.postman_collection.json \
+  --timeout-request 180000 \
+  --delay-request 500 \
+  --env-var "allowedModel=deepseek-r1:7b"
+```
+
+- `--timeout-request 180000` — gives each request up to 3 minutes; LLM calls and SSE stream tests need to wait for the final `done` event.
+- `--delay-request 500` — 500 ms between requests to avoid hammering the concurrency queue.
 
 **Optional: HTML report**
 ```bash
@@ -218,38 +323,13 @@ newman run local-ai-server.postman_collection.json \
   --reporter-htmlextra-export report.html
 ```
 
-**What to expect from a passing run:**
-
-```
-┌─────────────────────────┬───────────────────┬───────────────────┐
-│                         │          executed │            failed │
-├─────────────────────────┼───────────────────┼───────────────────┤
-│              iterations │                 1 │                 0 │
-│                requests │                20 │                 0 │
-│            test-scripts │                20 │                 0 │
-│              assertions │                40 │                 0 │
-└─────────────────────────┴───────────────────┴───────────────────┘
-```
-
-Total wall-clock time will be roughly 2–5 minutes depending on model speed. Average response time for LLM calls is in the range of 5–45 seconds; the health check and error-path requests respond in milliseconds.
-
-**Models used by the collection**
-
-The collection has two model-related variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `allowedModel` | `gemma4:e2b` | Used in the "explicit model" test. Must be a model present in your `ALLOWED_MODELS`. |
-| `disallowedModel` | `gpt-99` | Used in the 400-rejection test. Intentionally not a real model name; will always be rejected. |
-
-If your `.env` lists only one model (e.g. `ALLOWED_MODELS=["gemma4:e2b"]`), **no tests will fail** because of it. The `allowedModel` variable already points to that model, and `disallowedModel` (`gpt-99`) is never in any allowed list regardless of your config.
-
-If you want to override `allowedModel` at run time without editing the collection file:
+**Overriding collection variables at run time:**
 ```bash
 newman run local-ai-server.postman_collection.json \
   --timeout-request 180000 \
   --delay-request 500 \
-  --env-var "allowedModel=llama3"
+  --env-var "allowedModel=gemma4:e2b" \
+  --env-var "baseUrl=http://192.168.1.10:8000"
 ```
 
 ---
@@ -257,16 +337,23 @@ newman run local-ai-server.postman_collection.json \
 ## Project Structure
 
 ```
-src/app/
-├── main.py            # FastAPI app, lifespan, exception handlers
-├── config.py          # Settings (pydantic-settings + .env)
-├── models.py          # Pydantic request/response schemas
-├── exceptions.py      # QueueOverloadError + handler
-├── session_store.py   # ChatSession dataclass + async SessionStore
-├── model_registry.py  # ChatOllama cache + semaphore concurrency
-└── routers/
-    ├── chat.py        # POST /chat, GET /chat/{id}, DELETE /chat/{id}
-    └── streaming.py   # GET /chat/{id}/stream (SSE)
+├── Dockerfile
+├── docker-compose.yml          # base: api + postgres + ollama (CPU)
+├── docker-compose.nvidia.yml   # override: adds NVIDIA GPU to ollama
+├── docker-compose.amd.yml      # override: switches ollama to ROCm image
+├── db/
+│   └── init.sql                # PostgreSQL schema (sessions, messages, users stub)
+├── AUTH_STRATEGY.md            # Options for adding OAuth2 in the future
+└── src/app/
+    ├── main.py            # FastAPI app, lifespan, exception handlers
+    ├── config.py          # Settings (pydantic-settings + .env)
+    ├── models.py          # Pydantic request/response schemas
+    ├── exceptions.py      # QueueOverloadError + handler
+    ├── session_store.py   # SessionStore (in-memory) + PostgresSessionStore
+    ├── model_registry.py  # ChatOllama cache + semaphore concurrency
+    └── routers/
+        ├── chat.py        # POST /chat, GET /chat/{id}, DELETE /chat/{id}
+        └── streaming.py   # POST /chat/stream, GET /chat/{id}/stream (SSE)
 ```
 
 ---

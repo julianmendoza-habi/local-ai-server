@@ -7,6 +7,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app import db as db_module
 from app.config import settings
 from app.exceptions import QueueOverloadError, queue_overload_handler
 from app.model_registry import ModelRegistry
@@ -14,6 +15,8 @@ from app.session_store import PostgresSessionStore, SessionStore
 from app.routers import chat as chat_module
 from app.routers.chat import router as chat_router
 from app.routers.streaming import router as streaming_router
+from app.routers.admin import router as admin_router
+from app.auth.router import router as auth_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool: asyncpg.Pool | None = None
     if settings.database_url:
         pool = await asyncpg.create_pool(settings.database_url)
+        db_module._pool = pool
         store: PostgresSessionStore | SessionStore = PostgresSessionStore(pool)
         logger.info("Using PostgreSQL session store")
     else:
@@ -64,6 +68,8 @@ async def ollama_connect_handler(request: Request, exc: httpx.ConnectError) -> J
     )
 
 
+app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(chat_router)
 app.include_router(streaming_router)
 

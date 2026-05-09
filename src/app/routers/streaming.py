@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import AsyncIterator, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,9 +9,10 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from ollama import ResponseError as OllamaResponseError
 
+from app.auth.dependencies import current_user
 from app.config import settings
 from app.exceptions import QueueOverloadError
-from app.models import ChatRequest
+from app.models import ChatRequest, TokenUser
 from app.model_registry import ModelRegistry
 from app.session_store import AbstractSessionStore, ChatSession
 from app.routers.chat import get_model_registry, get_session_store
@@ -91,6 +92,7 @@ async def _run_stream(
 @router.post("/chat/stream")
 async def post_stream_chat(
     request: ChatRequest,
+    user: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> StreamingResponse:
@@ -101,7 +103,7 @@ async def post_stream_chat(
         model_name = request.model or session.model
     else:
         model_name = request.model or settings.default_model
-        session = await store.create(str(uuid4()), model_name)
+        session = await store.create(str(uuid4()), model_name, user_id=UUID(user.id))
 
     if model_name not in settings.allowed_models:
         raise HTTPException(status_code=400, detail=f"Model '{model_name}' is not in the allowed list")
@@ -114,6 +116,7 @@ async def get_stream_chat(
     chat_id: str,
     message: str,
     mode: Literal["thinking", "nothinking"] | None = None,
+    _: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> StreamingResponse:

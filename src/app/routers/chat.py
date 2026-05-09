@@ -1,16 +1,17 @@
 import asyncio
 import logging
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from ollama import ResponseError as OllamaResponseError
 
+from app.auth.dependencies import current_user
 from app.config import settings
 from app.exceptions import QueueOverloadError
-from app.models import ChatHistoryResponse, ChatRequest, ChatResponse, DeleteResponse, MessageRecord
+from app.models import ChatHistoryResponse, ChatRequest, ChatResponse, DeleteResponse, MessageRecord, TokenUser
 from app.model_registry import ModelRegistry
 from app.session_store import AbstractSessionStore, ChatSession
 
@@ -62,10 +63,10 @@ def _serialize_messages(messages: list[BaseMessage]) -> list[MessageRecord]:
 @router.post("/chat", response_model=ChatResponse)
 async def post_chat(
     request: ChatRequest,
+    user: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> ChatResponse:
-    # Resolve session and model
     if request.chat_id:
         session = await store.get(request.chat_id)
         if session is None:
@@ -73,7 +74,7 @@ async def post_chat(
         model_name = request.model or session.model
     else:
         model_name = request.model or settings.default_model
-        session = await store.create(str(uuid4()), model_name)
+        session = await store.create(str(uuid4()), model_name, user_id=UUID(user.id))
 
     if model_name not in settings.allowed_models:
         raise HTTPException(status_code=400, detail=f"Model '{model_name}' is not in the allowed list")
@@ -81,11 +82,9 @@ async def post_chat(
     reasoning = _MODE_TO_REASONING.get(request.mode) if request.mode else None
     llm = await registry.get_llm(model_name)
 
-    # Build context with sliding window
     human_msg = HumanMessage(content=request.message)
     context = session.truncated_messages(settings.max_messages_per_session) + [human_msg]
 
-    # Acquire concurrency slot
     queue_enter = time.monotonic()
     try:
         await registry.acquire()
@@ -119,13 +118,14 @@ async def post_chat(
     thinking = response.additional_kwargs.get("reasoning_content")
 
     logger.info(
-        "chat_id=%s model=%s mode=%s queue_wait_ms=%.1f llm_time_ms=%.1f thinking=%s",
+        "chat_id=%s model=%s mode=%s queue_wait_ms=%.1f llm_time_ms=%.1f thinking=%s user=%s",
         session.chat_id,
         model_name,
         request.mode,
         queue_wait_ms,
         llm_ms,
         thinking is not None,
+        user.email,
     )
 
     await store.append_messages(session.chat_id, [human_msg, response])
@@ -142,6 +142,7 @@ async def post_chat(
 @router.get("/chat/{chat_id}", response_model=ChatHistoryResponse)
 async def get_chat(
     chat_id: str,
+    _: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
 ) -> ChatHistoryResponse:
     session = await store.get(chat_id)
@@ -159,6 +160,7 @@ async def get_chat(
 @router.delete("/chat/{chat_id}", response_model=DeleteResponse)
 async def delete_chat(
     chat_id: str,
+    _: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
 ) -> DeleteResponse:
     deleted = await store.delete(chat_id)

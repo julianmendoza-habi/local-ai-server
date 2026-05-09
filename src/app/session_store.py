@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
+from uuid import UUID
 
 import asyncpg
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -47,7 +48,7 @@ class ChatSession:
 
 
 class AbstractSessionStore(Protocol):
-    async def create(self, chat_id: str, model: str) -> ChatSession: ...
+    async def create(self, chat_id: str, model: str, user_id: UUID | None = None) -> ChatSession: ...
     async def get(self, chat_id: str) -> ChatSession | None: ...
     async def append_messages(self, chat_id: str, messages: list[BaseMessage]) -> None: ...
     async def delete(self, chat_id: str) -> bool: ...
@@ -60,7 +61,7 @@ class SessionStore:
         self._sessions: dict[str, ChatSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, chat_id: str, model: str) -> ChatSession:
+    async def create(self, chat_id: str, model: str, user_id: UUID | None = None) -> ChatSession:
         session = ChatSession(
             chat_id=chat_id,
             model=model,
@@ -91,12 +92,13 @@ class PostgresSessionStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    async def create(self, chat_id: str, model: str) -> ChatSession:
+    async def create(self, chat_id: str, model: str, user_id: UUID | None = None) -> ChatSession:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "INSERT INTO chat_sessions (id, model) VALUES ($1, $2) RETURNING created_at",
+                "INSERT INTO chat_sessions (id, model, user_id) VALUES ($1, $2, $3) RETURNING created_at",
                 chat_id,
                 model,
+                user_id,
             )
         return ChatSession(chat_id=chat_id, model=model, created_at=row["created_at"])
 

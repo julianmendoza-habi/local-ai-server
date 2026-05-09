@@ -8,6 +8,7 @@ Three Postman/Newman collections are included — see [Running Tests](#running-t
 
 - **Multi-model support** — select a model per request or use the configured default
 - **Chat sessions** — stateful conversations backed by PostgreSQL (falls back to in-memory without `DATABASE_URL`)
+- **Authentication** — JWT-based auth with local email/password login; admin-controlled allowlist
 - **Thinking / non-thinking modes** — maps to Ollama's native `think` parameter
 - **Concurrency control** — semaphore-based queue; configurable max concurrent requests and queue depth
 - **Streaming** — SSE endpoint for token-by-token streaming
@@ -114,6 +115,99 @@ Interactive docs: `http://localhost:8000/docs`
 | `MAX_MESSAGES_PER_SESSION` | `20` | Sliding window per chat |
 | `OLLAMA_KEEP_ALIVE` | `-1` | Seconds to keep model in VRAM (-1 = forever) |
 | `DATABASE_URL` | _(unset)_ | PostgreSQL DSN. If unset, sessions are stored in memory (lost on restart) |
+| `JWT_SECRET` | `change-me-in-production` | Secret used to sign JWTs — change before deploying |
+| `JWT_EXPIRE_MINUTES` | `10080` (7 days) | Token lifetime in minutes |
+| `ADMIN_EMAILS` | _(unset)_ | Comma-separated emails that bypass the allowlist and receive `is_admin=true` |
+
+---
+
+## Authentication
+
+All `/chat` endpoints require a valid JWT in the `Authorization: Bearer <token>` header.
+
+### Setup
+
+**1. Set your admin email in `.env`:**
+```
+ADMIN_EMAILS=you@example.com
+```
+Admin emails bypass the allowlist and can call `/admin/*` endpoints.
+
+**2. Register your account (admin emails skip the allowlist check):**
+```bash
+curl -s -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'
+# → {"access_token": "<jwt>", "token_type": "bearer"}
+```
+
+**3. Add other users to the allowlist:**
+```bash
+TOKEN="<your jwt>"
+
+curl -s -X POST http://localhost:8000/admin/allowed-emails \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "colleague@example.com", "note": "team member"}'
+```
+
+**4. Allowed users register themselves:**
+```bash
+curl -s -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "colleague@example.com", "password": "theirpassword"}'
+```
+
+### Auth endpoints
+
+#### `POST /auth/register`
+
+Creates an account. The email must be in the allowlist or in `ADMIN_EMAILS`.
+
+**Request:**
+```json
+{ "email": "you@example.com", "password": "min8chars", "display_name": "Optional Name" }
+```
+**Response:** `{"access_token": "...", "token_type": "bearer"}`
+
+---
+
+#### `POST /auth/login`
+
+**Request:**
+```json
+{ "email": "you@example.com", "password": "yourpassword" }
+```
+**Response:** `{"access_token": "...", "token_type": "bearer"}`
+
+---
+
+#### `GET /auth/me`
+
+Returns the current user's profile. Requires `Authorization: Bearer <token>`.
+
+---
+
+### Admin endpoints
+
+All `/admin/*` endpoints require a token from an account with `is_admin=true`.
+
+#### `GET /admin/allowed-emails`
+Returns the full allowlist.
+
+#### `POST /admin/allowed-emails`
+```json
+{ "email": "new@example.com", "note": "optional label" }
+```
+
+#### `DELETE /admin/allowed-emails/{email}`
+Removes an email from the allowlist. Does not delete the user account if one already exists.
+
+#### `GET /admin/users`
+Lists all registered users.
+
+#### `DELETE /admin/users/{user_id}`
+Deletes a user account (cannot delete your own).
 
 ---
 
@@ -206,9 +300,19 @@ Returns `{"status": "ok"}`.
 
 ## Example `curl` Requests
 
+All chat requests require `Authorization: Bearer <token>`. Get a token first:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
 ### New chat (default model)
 ```bash
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "Explain recursion briefly"}' | python3 -m json.tool
 ```
@@ -216,6 +320,7 @@ curl -s -X POST http://localhost:8000/chat \
 ### New chat with thinking mode
 ```bash
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "What is 17 * 38?", "mode": "thinking"}' | python3 -m json.tool
 ```
@@ -225,6 +330,7 @@ curl -s -X POST http://localhost:8000/chat \
 CHAT_ID="<chat_id from previous response>"
 
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"Give me a code example\", \"chat_id\": \"$CHAT_ID\"}" | python3 -m json.tool
 ```
@@ -232,6 +338,7 @@ curl -s -X POST http://localhost:8000/chat \
 ### Use a specific model
 ```bash
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello!", "model": "llama3"}' | python3 -m json.tool
 ```
@@ -239,27 +346,32 @@ curl -s -X POST http://localhost:8000/chat \
 ### Stream a response — new session (first message streams immediately)
 ```bash
 curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "Explain closures briefly."}'
 # Save the chat_id from the done event, then continue:
 curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"Give me a Python example.\", \"chat_id\": \"$CHAT_ID\"}"
 ```
 
 ### Stream a response — existing session (GET)
 ```bash
-curl -N "http://localhost:8000/chat/$CHAT_ID/stream?message=Summarise+that&mode=nothinking"
+curl -N -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/chat/$CHAT_ID/stream?message=Summarise+that&mode=nothinking"
 ```
 
 ### Get chat history
 ```bash
-curl -s http://localhost:8000/chat/$CHAT_ID | python3 -m json.tool
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/chat/$CHAT_ID | python3 -m json.tool
 ```
 
 ### Delete a session
 ```bash
-curl -s -X DELETE http://localhost:8000/chat/$CHAT_ID
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/chat/$CHAT_ID
 ```
 
 ---
@@ -342,16 +454,22 @@ newman run local-ai-server.postman_collection.json \
 ├── docker-compose.nvidia.yml   # override: adds NVIDIA GPU to ollama
 ├── docker-compose.amd.yml      # override: switches ollama to ROCm image
 ├── db/
-│   └── init.sql                # PostgreSQL schema (sessions, messages, users stub)
-├── AUTH_STRATEGY.md            # Options for adding OAuth2 in the future
+│   └── init.sql                # PostgreSQL schema (users, user_identities, allowed_emails, sessions, messages)
 └── src/app/
     ├── main.py            # FastAPI app, lifespan, exception handlers
     ├── config.py          # Settings (pydantic-settings + .env)
+    ├── db.py              # Shared asyncpg pool accessor
     ├── models.py          # Pydantic request/response schemas
     ├── exceptions.py      # QueueOverloadError + handler
     ├── session_store.py   # SessionStore (in-memory) + PostgresSessionStore
     ├── model_registry.py  # ChatOllama cache + semaphore concurrency
+    ├── auth/
+    │   ├── dependencies.py  # current_user, require_admin FastAPI dependencies
+    │   ├── hashing.py       # bcrypt password hash/verify
+    │   ├── jwt_utils.py     # JWT encode/decode (PyJWT)
+    │   └── router.py        # POST /auth/register, /auth/login, GET /auth/me
     └── routers/
+        ├── admin.py       # GET/POST/DELETE /admin/allowed-emails, GET/DELETE /admin/users
         ├── chat.py        # POST /chat, GET /chat/{id}, DELETE /chat/{id}
         └── streaming.py   # POST /chat/stream, GET /chat/{id}/stream (SSE)
 ```

@@ -32,8 +32,16 @@ class ChatResponse(BaseModel):
 class ChatHistoryResponse(BaseModel):
     chat_id: str
     model: str
+    title: str | None
     created_at: datetime
     messages: list[MessageRecord]
+
+
+class ChatSessionSummary(BaseModel):
+    chat_id: str
+    model: str
+    title: str | None
+    created_at: datetime
 
 
 class DeleteResponse(BaseModel):

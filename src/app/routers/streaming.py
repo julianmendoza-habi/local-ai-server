@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import AsyncIterator, Literal
@@ -15,7 +16,7 @@ from app.exceptions import QueueOverloadError
 from app.models import ChatRequest, TokenUser
 from app.model_registry import ModelRegistry
 from app.session_store import AbstractSessionStore, ChatSession
-from app.routers.chat import get_model_registry, get_session_store
+from app.routers.chat import _assert_owner, _generate_title, get_model_registry, get_session_store
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ async def _run_stream(
     mode: Literal["thinking", "nothinking"] | None,
     registry: ModelRegistry,
     store: AbstractSessionStore,
+    generate_title: bool = False,
 ) -> AsyncIterator[str]:
     model_name = session.model
     reasoning = _MODE_TO_REASONING.get(mode) if mode else None
@@ -82,8 +84,14 @@ async def _run_stream(
     finally:
         registry.release()
 
-    ai_msg = AIMessage(content="".join(chunks))
+    reply = "".join(chunks)
+    ai_msg = AIMessage(content=reply)
     await store.append_messages(session.chat_id, [human_msg, ai_msg])
+
+    if generate_title:
+        asyncio.create_task(
+            _generate_title(session.chat_id, model_name, message, reply, registry, store)
+        )
 
     logger.info("stream complete chat_id=%s model=%s tokens=%d", session.chat_id, model_name, len(chunks))
     yield _sse({"done": True, "chat_id": session.chat_id, "model": model_name})
@@ -96,10 +104,12 @@ async def post_stream_chat(
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> StreamingResponse:
+    is_new_session = not request.chat_id
     if request.chat_id:
         session = await store.get(request.chat_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Chat session '{request.chat_id}' not found")
+        _assert_owner(session, user)
         model_name = request.model or session.model
     else:
         model_name = request.model or settings.default_model
@@ -108,7 +118,9 @@ async def post_stream_chat(
     if model_name not in settings.allowed_models:
         raise HTTPException(status_code=400, detail=f"Model '{model_name}' is not in the allowed list")
 
-    return _streaming_response(_run_stream(session, request.message, request.mode, registry, store))
+    return _streaming_response(
+        _run_stream(session, request.message, request.mode, registry, store, generate_title=is_new_session)
+    )
 
 
 @router.get("/chat/{chat_id}/stream")
@@ -116,13 +128,14 @@ async def get_stream_chat(
     chat_id: str,
     message: str,
     mode: Literal["thinking", "nothinking"] | None = None,
-    _: TokenUser = Depends(current_user),
+    user: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> StreamingResponse:
     session = await store.get(chat_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Chat session '{chat_id}' not found")
+    _assert_owner(session, user)
 
     if session.model not in settings.allowed_models:
         raise HTTPException(status_code=400, detail=f"Model '{session.model}' is not in the allowed list")

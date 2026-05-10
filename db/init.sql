@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     id          TEXT        PRIMARY KEY,
     user_id     UUID        REFERENCES users(id) ON DELETE CASCADE,
     model       TEXT        NOT NULL,
+    title       TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

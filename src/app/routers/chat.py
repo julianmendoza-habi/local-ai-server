@@ -11,7 +11,7 @@ from ollama import ResponseError as OllamaResponseError
 from app.auth.dependencies import current_user
 from app.config import settings
 from app.exceptions import QueueOverloadError
-from app.models import ChatHistoryResponse, ChatRequest, ChatResponse, DeleteResponse, MessageRecord, TokenUser
+from app.models import ChatHistoryResponse, ChatRequest, ChatResponse, ChatSessionSummary, DeleteResponse, MessageRecord, TokenUser
 from app.model_registry import ModelRegistry
 from app.session_store import AbstractSessionStore, ChatSession
 
@@ -47,6 +47,39 @@ _MODE_TO_REASONING: dict[str, bool] = {
 }
 
 
+def _assert_owner(session: "ChatSession", user: TokenUser) -> None:
+    if session.user_id is not None and session.user_id != UUID(user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+async def _generate_title(
+    chat_id: str,
+    model: str,
+    first_message: str,
+    first_reply: str,
+    registry: ModelRegistry,
+    store: AbstractSessionStore,
+) -> None:
+    prompt = (
+        "Generate a short title (4 to 6 words) that describes what the following conversation is about. "
+        "Return ONLY the title, no quotes, no punctuation at the end.\n\n"
+        f"User: {first_message[:400]}\n"
+        f"Assistant: {first_reply[:400]}"
+    )
+    try:
+        await registry.acquire()
+        llm = await registry.get_llm(model)
+        result = await asyncio.wait_for(llm.ainvoke([HumanMessage(content=prompt)]), timeout=30.0)
+        title = str(result.content).strip().strip("\"'").strip()[:120]
+        if title:
+            await store.update_title(chat_id, title)
+            logger.info("title generated for chat_id=%s: %r", chat_id, title)
+    except Exception:
+        logger.warning("Failed to generate title for chat_id=%s", chat_id, exc_info=True)
+    finally:
+        registry.release()
+
+
 def _serialize_messages(messages: list[BaseMessage]) -> list[MessageRecord]:
     records: list[MessageRecord] = []
     for msg in messages:
@@ -67,10 +100,12 @@ async def post_chat(
     store: AbstractSessionStore = Depends(get_session_store),
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> ChatResponse:
+    is_new_session = not request.chat_id
     if request.chat_id:
         session = await store.get(request.chat_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Chat session '{request.chat_id}' not found")
+        _assert_owner(session, user)
         model_name = request.model or session.model
     else:
         model_name = request.model or settings.default_model
@@ -130,6 +165,11 @@ async def post_chat(
 
     await store.append_messages(session.chat_id, [human_msg, response])
 
+    if is_new_session:
+        asyncio.create_task(
+            _generate_title(session.chat_id, model_name, request.message, str(response.content), registry, store)
+        )
+
     return ChatResponse(
         chat_id=session.chat_id,
         model=model_name,
@@ -139,19 +179,30 @@ async def post_chat(
     )
 
 
+@router.get("/chats", response_model=list[ChatSessionSummary])
+async def list_chats(
+    user: TokenUser = Depends(current_user),
+    store: AbstractSessionStore = Depends(get_session_store),
+) -> list[ChatSessionSummary]:
+    sessions = await store.list_by_user(UUID(user.id))
+    return [ChatSessionSummary(chat_id=s.chat_id, model=s.model, title=s.title, created_at=s.created_at) for s in sessions]
+
+
 @router.get("/chat/{chat_id}", response_model=ChatHistoryResponse)
 async def get_chat(
     chat_id: str,
-    _: TokenUser = Depends(current_user),
+    user: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
 ) -> ChatHistoryResponse:
     session = await store.get(chat_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Chat session '{chat_id}' not found")
+    _assert_owner(session, user)
 
     return ChatHistoryResponse(
         chat_id=session.chat_id,
         model=session.model,
+        title=session.title,
         created_at=session.created_at,
         messages=_serialize_messages(session.messages),
     )
@@ -160,10 +211,12 @@ async def get_chat(
 @router.delete("/chat/{chat_id}", response_model=DeleteResponse)
 async def delete_chat(
     chat_id: str,
-    _: TokenUser = Depends(current_user),
+    user: TokenUser = Depends(current_user),
     store: AbstractSessionStore = Depends(get_session_store),
 ) -> DeleteResponse:
-    deleted = await store.delete(chat_id)
-    if not deleted:
+    session = await store.get(chat_id)
+    if session is None:
         raise HTTPException(status_code=404, detail=f"Chat session '{chat_id}' not found")
+    _assert_owner(session, user)
+    await store.delete(chat_id)
     return DeleteResponse(deleted=True, chat_id=chat_id)

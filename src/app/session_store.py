@@ -35,6 +35,8 @@ class ChatSession:
     chat_id: str
     model: str
     created_at: datetime
+    user_id: UUID | None = None
+    title: str | None = None
     messages: list[BaseMessage] = field(default_factory=list)
 
     def truncated_messages(self, max_count: int) -> list[BaseMessage]:
@@ -50,6 +52,8 @@ class ChatSession:
 class AbstractSessionStore(Protocol):
     async def create(self, chat_id: str, model: str, user_id: UUID | None = None) -> ChatSession: ...
     async def get(self, chat_id: str) -> ChatSession | None: ...
+    async def list_by_user(self, user_id: UUID) -> list[ChatSession]: ...
+    async def update_title(self, chat_id: str, title: str) -> None: ...
     async def append_messages(self, chat_id: str, messages: list[BaseMessage]) -> None: ...
     async def delete(self, chat_id: str) -> bool: ...
 
@@ -66,6 +70,7 @@ class SessionStore:
             chat_id=chat_id,
             model=model,
             created_at=datetime.now(tz=timezone.utc),
+            user_id=user_id,
         )
         async with self._lock:
             self._sessions[chat_id] = session
@@ -74,6 +79,16 @@ class SessionStore:
     async def get(self, chat_id: str) -> ChatSession | None:
         async with self._lock:
             return self._sessions.get(chat_id)
+
+    async def list_by_user(self, user_id: UUID) -> list[ChatSession]:
+        async with self._lock:
+            return [s for s in self._sessions.values() if s.user_id == user_id]
+
+    async def update_title(self, chat_id: str, title: str) -> None:
+        async with self._lock:
+            session = self._sessions.get(chat_id)
+            if session is not None:
+                session.title = title
 
     async def append_messages(self, chat_id: str, messages: list[BaseMessage]) -> None:
         async with self._lock:
@@ -105,7 +120,7 @@ class PostgresSessionStore:
     async def get(self, chat_id: str) -> ChatSession | None:
         async with self._pool.acquire() as conn:
             session_row = await conn.fetchrow(
-                "SELECT id, model, created_at FROM chat_sessions WHERE id = $1",
+                "SELECT id, model, user_id, title, created_at FROM chat_sessions WHERE id = $1",
                 chat_id,
             )
             if session_row is None:
@@ -118,8 +133,29 @@ class PostgresSessionStore:
             chat_id=session_row["id"],
             model=session_row["model"],
             created_at=session_row["created_at"],
+            user_id=session_row["user_id"],
+            title=session_row["title"],
             messages=[_message_from_row(r) for r in message_rows],
         )
+
+    async def list_by_user(self, user_id: UUID) -> list[ChatSession]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, model, title, created_at FROM chat_sessions WHERE user_id = $1 ORDER BY created_at DESC",
+                user_id,
+            )
+        return [
+            ChatSession(chat_id=r["id"], model=r["model"], created_at=r["created_at"], user_id=user_id, title=r["title"])
+            for r in rows
+        ]
+
+    async def update_title(self, chat_id: str, title: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE chat_sessions SET title = $1 WHERE id = $2",
+                title,
+                chat_id,
+            )
 
     async def append_messages(self, chat_id: str, messages: list[BaseMessage]) -> None:
         rows = [
